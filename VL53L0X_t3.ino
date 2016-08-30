@@ -46,7 +46,7 @@
  */
 
 // These are the registers defined in ST Microelecronics' API
-// Note the registers have 2-bytes addresses, but for some reason I can only get sensble data out of the VL53L0X when
+// Note the registers have 2-bytes addresses, but for some reason I can only get sensible data out of the VL53L0X when
 // I assume an 8-bit register address using only the LSbyte
 //
 #define VL53L0X_REG_SYSRANGE_START                        0x0000
@@ -163,6 +163,9 @@
 #define VL53L0X_REG_DYNAMIC_SPAD_NUM_REQUESTED_REF_SPAD 0x4E /* 0x14E */
 #define VL53L0X_REG_DYNAMIC_SPAD_REF_EN_START_OFFSET    0x4F /* 0x14F */
 #define VL53L0X_REG_POWER_MANAGEMENT_GO1_POWER_FORCE    0x80
+     #define VL53L0X_POWERMODE_STANDBY        0x00 //set power mode to standy level 1
+     #define VL53L0X_POWERMODE_IDLE           0x01 //set power mode to idle level 1
+
 
 /*
  * Speed of light in um per 1E-10 Seconds
@@ -184,6 +187,7 @@ int intPin = 9;
 
 bool newData = false;
 uint8_t rangeData[14];
+uint8_t rawData[4] = {0, 0, 0, 0};
 
 #define verboseMode  true
 
@@ -201,10 +205,13 @@ void setup()
   digitalWrite(myLed, LOW);
   pinMode(intPin, INPUT);
 
+  byte HVI2C = readByte(VL53L0X_ADDRESS, VL53L0X_REG_VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV);
+  writeByte(VL53L0X_ADDRESS, VL53L0X_REG_VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV, HVI2C & 0x01); // set I2C HIGH to 2.8 V
+
   I2Cscan();
   
   delay(1000);
- 
+
   // Read the WHO_AM_I register, this is a good test of communication
   Serial.println("VL53L0X proximity sensor...");
   byte c = readByte(VL53L0X_ADDRESS, VL53L0X_WHO_AM_I);  // Read WHO_AM_I register for VL53L0X
@@ -220,8 +227,18 @@ void setup()
   
   Serial.println("VL53L0X is online...");
 
-  writeByte(VL53L0X_ADDRESS, VL53L0X_REG_SYSTEM_INTERRUPT_CONFIG_GPIO, 0x06); // enable data ready interrupt,active HIGH
+  writeByte(VL53L0X_ADDRESS, VL53L0X_REG_SOFT_RESET_GO2_SOFT_RESET_N, 0x01);  // reset device
+  delay(100);
+  
+  // Configure GPIO1 for interrupt, active HIGH
+  byte actHIGH = readByte(VL53L0X_ADDRESS, VL53L0X_REG_GPIO_HV_MUX_ACTIVE_HIGH);
+  Serial.print("Active High byte = "); Serial.println(actHIGH);
+  writeByte(VL53L0X_ADDRESS, VL53L0X_REG_GPIO_HV_MUX_ACTIVE_HIGH, actHIGH | 0x10); // GPIO1 interrupt active HIGH
+  actHIGH = readByte(VL53L0X_ADDRESS, VL53L0X_REG_GPIO_HV_MUX_ACTIVE_HIGH);
+  Serial.print("Active High byte = "); Serial.println(actHIGH);
+  writeByte(VL53L0X_ADDRESS, VL53L0X_REG_SYSTEM_INTERRUPT_CONFIG_GPIO, 0x04); // enable data ready interrupt 
 
+  // Get some basic infor about the sensor
   byte val1 = readByte(VL53L0X_ADDRESS, VL53L0X_REG_PRE_RANGE_CONFIG_VCSEL_PERIOD);
   Serial.print("PRE_RANGE_CONFIG_VCSEL_PERIOD="); Serial.println(val1); 
   Serial.print(" decode: "); Serial.println(VL53L0X_decode_vcsel_period(val1));
@@ -230,7 +247,11 @@ void setup()
   Serial.print("FINAL_RANGE_CONFIG_VCSEL_PERIOD="); Serial.println(val1);
   Serial.print(" decode: "); Serial.println(VL53L0X_decode_vcsel_period(val1));
 
-  attachInterrupt(intPin, myinthandler, RISING);  // define interrupt for INT pin output of VL53L0X
+  readBytes(VL53L0X_ADDRESS, VL53L0X_REG_SYSTEM_INTERMEASUREMENT_PERIOD, 4, &rawData[0]);
+  uint32_t IMPeriod = (((uint32_t) rawData[0]) << 24 | ((uint32_t) rawData[1]) << 16 | ((uint32_t) rawData[2]) << 8 | rawData[3]);
+  Serial.print(" System Intermeasurement period = "); Serial.print(IMPeriod); Serial.println(" ms");
+  
+  attachInterrupt(intPin, myinthandler, RISING);  // define interrupt for GPI01 pin output of VL53L0X
 
   }
   else
@@ -243,27 +264,15 @@ void setup()
 
 void loop()
 {  
-  writeByte(VL53L0X_ADDRESS, VL53L0X_REG_SYSRANGE_START, 0x01); // continuous mode and arm next shot
-
-//  if (newData) //wait for interrupt
-  {
+  writeByte(VL53L0X_ADDRESS, VL53L0X_REG_SYSRANGE_START, 0x02); // continuous mode and arm next shot
+  
+ // byte intStatus = readByte(VL53L0X_ADDRESS, VL53L0X_REG_RESULT_RANGE_STATUS);// Poll for data ready
+ // if(intStatus & 0x01) // poll for data ready
+  
+  if (newData) // wait for data ready interrupt
   newData = false;
 
-  uint8_t status = readByte(VL53L0X_ADDRESS, VL53L0X_REG_RESULT_INTERRUPT_STATUS);  // read interrupt status register
-
-  if(verboseMode) {
-  Serial.print("Status = "); Serial.println(status);
-    
-  // first check for damage or error
-  if(status == 0x40) Serial.println("laser safety error!");
-  if(status == 0x80) Serial.println("PLL1 or PLL2 error!");
-  Serial.println("  ");
-     
-  if( !(status & 0x40) && !(status & 0x80) ) Serial.println("No errors...");
-  }
- 
-// if(newData) {Serial.print("count = "); Serial.println(cnt); Serial.println("ready");} else Serial.println("not ready");
- 
+  {
  readBytes(VL53L0X_ADDRESS, VL53L0X_REG_RESULT_RANGE_STATUS, 14, &rangeData[0]); // continuous ranging
 
  Serial.print("byte 1 = "); Serial.println(rangeData[0]);
@@ -282,8 +291,27 @@ void loop()
  Serial.print("byte 14 = "); Serial.println(rangeData[13]);
  Serial.println("  ");
 
- Serial.print("Ambient count = "); Serial.println( (uint16_t) ((uint16_t) rangeData[6] << 8) | rangeData[7]);
- Serial.print("Signal count = "); Serial.println( (uint16_t) ((uint16_t) rangeData[8] << 8) | rangeData[9]);
+  byte devError = (rangeData[0] & 0x78) >> 3; // Check for errors
+ 
+  if(devError == 0)     Serial.println("Data OK!");// No device error
+  if(devError == 0x01)  Serial.println("VCSEL CONTINUITY TEST FAILURE!");
+  if(devError == 0x02)  Serial.println("VCSEL WATCHDOG TEST FAILURE!");
+  if(devError == 0x03)  Serial.println("NO VHV VALUE FOUND!");
+  if(devError == 0x04)  Serial.println("MSRC NO TARGET!");
+  if(devError == 0x05)  Serial.println("SNR CHECK!");
+  if(devError == 0x06)  Serial.println("RANGE PHASE CHECK!");
+  if(devError == 0x07)  Serial.println("SIGMA THRESHOLD CHECK!");
+  if(devError == 0x08)  Serial.println("TCC!");
+  if(devError == 0x09)  Serial.println("PHASE CONSISTENCY!");
+  if(devError == 0x0A)  Serial.println("MIN CLIP!");
+  if(devError == 0x0B)  Serial.println("RANGE COMPLETE!");
+  if(devError == 0x0C)  Serial.println("ALGO UNDERFLOW!");
+  if(devError == 0x0D)  Serial.println("ALGO OVERFLOW!");
+  if(devError == 0x0E)  Serial.println("RANGE IGNORE THRESHOLD!");
+  
+ Serial.print("Effective SPAD Return Count = "); Serial.println( ((float) (rangeData[2]) + (float)rangeData[3]/255.), 2); // 8.8 format
+ Serial.print("Signal Rate = "); Serial.print( (uint16_t) ((uint16_t) rangeData[6] << 8) | rangeData[7]); Serial.println(" mega counts per second");
+ Serial.print("Ambient Rate = "); Serial.print( (uint16_t) ((uint16_t) rangeData[8] << 8) | rangeData[9]); Serial.println(" mega counts per second");
  Serial.print("Distance = "); Serial.print( (uint16_t) ((uint16_t) rangeData[10] << 8) | rangeData[11]); Serial.println(" mm");
 
 
@@ -392,4 +420,3 @@ void I2Cscan()
         delay(1);
         dest[i++] = Wire.read(); }            // Put read results in the Rx buffer
 }
-
